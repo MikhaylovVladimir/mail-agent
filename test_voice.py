@@ -43,6 +43,10 @@ class VoiceTests(unittest.TestCase):
                 model.return_value.transcribe.return_value = (iter([SimpleNamespace(text=' Отчёт готов. ')]), None)
                 self.assertEqual(transcribe(np.ones(RATE, dtype=np.float32) * .1, folder), 'Отчёт готов.')
                 self.assertEqual(model.call_args.kwargs, dict(device='cpu', compute_type='int8', cpu_threads=2, local_files_only=True))
+                options = model.return_value.transcribe.call_args.kwargs
+                self.assertEqual(options['language'], 'ru')
+                self.assertEqual(options['temperature'], 0)
+                self.assertFalse(options['condition_on_previous_text'])
 
 
 if __name__ == '__main__':

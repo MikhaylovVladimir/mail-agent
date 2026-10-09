@@ -7,6 +7,9 @@ MAX_SECONDS = 120
 
 
 def cached_model():
+    preferred = Path(__file__).resolve().parent / 'private/speech-model-small'
+    if all((preferred / name).is_file() for name in ('model.bin', 'config.json', 'tokenizer.json')):
+        return str(preferred)
     root = Path.home() / '.cache/huggingface/hub/models--Systran--faster-whisper-tiny/snapshots'
     for path in sorted(root.glob('*')):
         if all((path / name).is_file() for name in ('model.bin', 'config.json', 'tokenizer.json')):
@@ -79,7 +82,9 @@ def transcribe(audio, folder):
         raise ValueError('Речь не записана. Проверьте микрофон и повторите диктовку.')
     from faster_whisper import WhisperModel
     model = WhisperModel(model_path, device='cpu', compute_type='int8', cpu_threads=2, local_files_only=True)
-    segments, _ = model.transcribe(audio, language='ru', beam_size=5, vad_filter=True)
+    segments, _ = model.transcribe(audio, language='ru', task='transcribe', beam_size=5,
+                                   temperature=0, condition_on_previous_text=False,
+                                   vad_filter=True, vad_parameters={'min_silence_duration_ms': 500})
     text = ' '.join(segment.text.strip() for segment in segments).strip()
     if not text:
         raise ValueError('Не удалось распознать речь. Повторите диктовку.')
