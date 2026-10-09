@@ -132,9 +132,9 @@ class Catalog:
         with self.connect() as db:
             db.row_factory = sqlite3.Row
             rows = [dict(row) for row in db.execute('SELECT * FROM files WHERE active=1 ORDER BY date DESC,path')]
-        words = query.casefold().split()
+        words = query.casefold().replace('ё', 'е').split()
         return [row for row in rows if all(word in ' '.join(str(row[k]) for k in
-                ('name', 'text', 'sender', 'subject', 'genre')).casefold() for word in words)]
+                ('name', 'text', 'sender', 'subject', 'genre')).casefold().replace('ё', 'е') for word in words)]
 
     def file_path(self, relative):
         path = (self.root / relative).resolve()

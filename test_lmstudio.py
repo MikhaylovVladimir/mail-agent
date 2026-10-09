@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from app import ask_model
 from contacts import Contacts, DRAFT_SYSTEM, validate_draft
+from attachment_selection import select_attachments
+from catalog import Catalog
 
 
 @unittest.skipUnless(os.environ.get('MAIL_AGENT_LIVE_TESTS') == '1', 'LM Studio tests are opt-in')
@@ -36,6 +38,17 @@ class LMStudioTests(unittest.TestCase):
     def test_recipient_field_has_priority(self):
         draft = self.prepare('Напиши начальнику, что встреча завершена.', override='коллега')
         self.assertEqual(draft['recipient'], 'anna@example.com')
+
+    def test_request_selects_attachment_by_content(self):
+        root = Path(self.temp.name) / 'attachments'
+        root.mkdir()
+        report = root / 'document.txt'
+        report.write_text('Отчёт за сентябрь 7500', encoding='utf-8')
+        catalog = Catalog(root)
+        catalog.scan()
+        draft = self.prepare('Напиши начальнику, что отчёт готов, и приложи отчёт за сентябрь.')
+        self.assertTrue(draft['attachment_queries'])
+        self.assertEqual(select_attachments(catalog, draft['attachment_queries']), [str(report)])
 
 
 if __name__ == '__main__':

@@ -55,6 +55,7 @@ class ContactTests(unittest.TestCase):
         app.contacts = self.store
         app.gmail = Mock()
         app.recipient, app.subject, app.body, app.log = Mock(), Mock(), Mock(), Mock()
+        app.attachments = Mock()
         app.window = Mock()
         app.window.after.side_effect = lambda delay, callback: callback()
         with patch('app.ask_model', return_value=self.answer()):

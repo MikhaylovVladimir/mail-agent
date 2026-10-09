@@ -15,6 +15,7 @@ from tkinter.scrolledtext import ScrolledText
 from catalog import Catalog
 from contacts import Contacts, DRAFT_SYSTEM, validate_draft
 from document_reader import LocalOCR
+from attachment_selection import check_files, select_attachments, attachment_requested
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -138,6 +139,7 @@ class App:
         self.buttons.append(button)
         self.attachments = ttk.Label(frame, text='Вложений нет')
         self.attachments.pack(anchor='w')
+        ttk.Button(frame, text='Убрать все вложения', command=self.clear_attachments).pack(anchor='w')
         self.status = ttk.Label(frame, text='Готово. Сначала загрузите модель в LM Studio и включите сервер.')
         self.status.pack(anchor='w', pady=10)
         ttk.Label(frame, text='Журнал действий').pack(anchor='w')
@@ -257,13 +259,24 @@ class App:
                              'provided_files': [Path(p).name for p in settings.get('files', [])]}, ensure_ascii=False)
         result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM, prompt)
         draft = validate_draft(result, self.contacts, settings['prompt'], override)
+        selected_files = settings.get('files', [])
+        if attachment_requested(settings['prompt']) and not selected_files and not draft['attachment_queries']:
+            raise ValueError('Запрошено вложение, но модель не указала поиск. Уточните запрос или выберите файл вручную.')
+        if draft['attachment_queries'] or selected_files:
+            selected_files = select_attachments(Catalog(settings['folder']), draft['attachment_queries'], selected_files)
         def show():
             self.recipient.set(draft['recipient'])
             self.subject.set(draft['subject'])
             self.body.delete('1.0', 'end')
             self.body.insert('1.0', draft['body'])
+            self.files = selected_files
+            self.attachments.config(text='; '.join(Path(p).name for p in self.files) or 'Вложений нет')
         self.window.after(0, show)
         self.log('Черновик готов: проверьте получателя, тему, текст и вложения.')
+
+    def clear_attachments(self):
+        self.files = []
+        self.attachments.config(text='Вложений нет')
 
     def open_contacts(self):
         popup = tk.Toplevel(self.window)
@@ -465,11 +478,12 @@ class App:
         if not messagebox.askyesno('Подтверждение отправки', f'Кому: {recipient}\nТема: {subject}\nВложения:\n{file_names}\n\nОтправить проверенный текст письма?'):
             return
         def deliver(settings):
+            validated_files = check_files(settings['folder'], files)
             message = EmailMessage()
             message['To'] = recipient
             message['Subject'] = subject
             message.set_content(body)
-            for filename in files:
+            for filename in validated_files:
                 path = Path(filename)
                 mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
                 major, minor = mime.split('/', 1)
