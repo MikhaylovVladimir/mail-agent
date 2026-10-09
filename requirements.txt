@@ -3,3 +3,7 @@ google-auth-oauthlib>=1.2,<2
 pypdf>=5,<7
 pypdfium2>=4,<6
 Pillow>=11,<13
+faster-whisper>=1.1,<2
+sounddevice>=0.5,<1
+numpy>=2,<3
+av>=11,<17

@@ -18,6 +18,7 @@ from document_reader import LocalOCR
 from attachment_selection import check_files, select_attachments, attachment_requested
 from style_history import sent_style_samples
 from mail_batch import collect_unprocessed
+from voice import Recorder, cached_model, validate_model, transcribe
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -104,6 +105,8 @@ class App:
         self.window = window
         self.gmail = None
         self.files = []
+        self.recorder = None
+        self.voice_model = cached_model()
         self.stop_sorting = threading.Event()
         self.contacts = Contacts(PRIVATE / 'contacts.sqlite3')
         window.title('Локальный почтовый агент')
@@ -142,6 +145,14 @@ class App:
         ttk.Label(frame, text='Запрос: например «Напиши начальнику, что отчёт готов»').pack(anchor='w')
         self.prompt = tk.Text(frame, height=3)
         self.prompt.pack(fill='x')
+        voice_row = ttk.Frame(frame)
+        voice_row.pack(fill='x', pady=4)
+        self.voice_button = ttk.Button(voice_row, text='Диктовать запрос', command=self.dictate)
+        self.voice_button.pack(side='left')
+        self.voice_cancel = ttk.Button(voice_row, text='Отменить запись', state='disabled', command=self.cancel_voice)
+        self.voice_cancel.pack(side='left', padx=8)
+        self.voice_settings = ttk.Button(voice_row, text='Модель речи…', command=self.choose_voice_model)
+        self.voice_settings.pack(side='left')
         self.use_style = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame, text='Учитывать стиль моих отправленных писем получателю (официальный тон)',
                         variable=self.use_style).pack(anchor='w')
@@ -167,6 +178,13 @@ class App:
         ttk.Label(frame, text='Журнал действий').pack(anchor='w')
         self.journal = ScrolledText(frame, height=6, state='disabled', wrap='word')
         self.journal.pack(fill='x')
+        window.protocol('WM_DELETE_WINDOW', self.close)
+
+    def close(self):
+        if self.recorder:
+            self.recorder.cancel()
+        self.stop_sorting.set()
+        self.window.destroy()
 
     def log(self, text):
         def show():
@@ -178,6 +196,8 @@ class App:
         self.window.after(0, show)
 
     def run(self, action):
+        self.voice_button.config(state='disabled')
+        self.voice_settings.config(state='disabled')
         # Read Tk state on the UI thread; workers never access Tk variables.
         settings = {name: getattr(self, name).get() for name in ('endpoint', 'model', 'limit', 'folder', 'recipient')}
         settings['prompt'] = self.prompt.get('1.0', 'end').strip()
@@ -195,10 +215,90 @@ class App:
                 self.log('Ошибка: ' + str(error))
             finally:
                 def finish():
+                    self.voice_button.config(state='normal')
+                    self.voice_settings.config(state='normal')
                     for button in self.buttons:
                         button.config(state='normal')
                     self.stop_button.config(state='disabled')
                 self.window.after(0, finish)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def choose_voice_model(self):
+        folder = filedialog.askdirectory(title='Локальная модель faster-whisper', initialdir=self.voice_model or str(PRIVATE))
+        if folder:
+            try:
+                self.voice_model = validate_model(folder)
+                (PRIVATE / 'voice-model.txt').write_text(self.voice_model, encoding='utf-8')
+                self.log('Модель речи выбрана. Распознавание работает локально.')
+            except ValueError as error:
+                messagebox.showerror('Модель речи', str(error))
+
+    def voice_idle(self):
+        self.voice_button.config(text='Диктовать запрос', state='normal')
+        self.voice_cancel.config(state='disabled')
+        self.voice_settings.config(state='normal')
+        for button in self.buttons:
+            button.config(state='normal')
+
+    def cancel_voice(self):
+        recorder, self.recorder = self.recorder, None
+        try:
+            if recorder:
+                recorder.cancel()
+        finally:
+            self.voice_idle()
+        self.log('Запись отменена; запрос сохранён.')
+
+    def dictate(self):
+        if self.recorder is None:
+            try:
+                saved = PRIVATE / 'voice-model.txt'
+                if saved.exists():
+                    self.voice_model = saved.read_text(encoding='utf-8').strip()
+                validate_model(self.voice_model)
+                recorder = Recorder()
+                recorder.start()
+                self.recorder = recorder
+            except Exception as error:
+                messagebox.showerror('Голосовой ввод', str(error))
+                return
+            for button in self.buttons:
+                button.config(state='disabled')
+            self.voice_settings.config(state='disabled')
+            self.voice_cancel.config(state='normal')
+            self.voice_button.config(text='Остановить и распознать')
+            self.log('Идёт запись с микрофона (до 2 минут).')
+            def poll():
+                if self.recorder is recorder:
+                    if recorder.full.is_set():
+                        self.dictate()
+                    else:
+                        self.window.after(200, poll)
+            self.window.after(200, poll)
+            return
+        recorder, self.recorder = self.recorder, None
+        self.voice_button.config(state='disabled')
+        self.voice_cancel.config(state='disabled')
+        folder = self.voice_model
+        self.log('Распознаётся речь…')
+        def worker():
+            try:
+                text = transcribe(recorder.stop(), folder)
+                error = None
+            except Exception as exc:
+                text, error = '', str(exc)
+            def finish():
+                if text:
+                    prefix = '\n' if self.prompt.get('1.0', 'end').strip() else ''
+                    self.prompt.insert('end', prefix + text)
+                    self.log('Речь добавлена в запрос. Проверьте текст перед подготовкой черновика.')
+                else:
+                    self.log('Голосовой ввод: ' + error)
+                self.voice_idle()
+            try:
+                self.window.after(0, finish)
+            except RuntimeError:
+                pass
         threading.Thread(target=worker, daemon=True).start()
 
     def connect(self, settings):
