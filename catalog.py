@@ -11,10 +11,16 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_TEXT = 200000
 
 
-def extract_text(path):
+def extract_text(path, ocr=None):
     if path.stat().st_size > MAX_BYTES:
         return '', 'Слишком большой файл (больше 20 МБ)'
     suffix = path.suffix.lower()
+    if suffix == '.pdf':
+        from document_reader import read_pdf
+        return read_pdf(path, ocr)
+    if suffix in {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'}:
+        from document_reader import read_image
+        return read_image(path, ocr)
     if suffix in {'.txt', '.csv', '.md', '.log'}:
         data = path.read_bytes()
         for encoding in ('utf-8-sig', 'utf-16', 'cp1251'):
@@ -48,10 +54,11 @@ def genre(text):
 
 
 class Catalog:
-    def __init__(self, root):
+    def __init__(self, root, ocr=None):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / '.catalog.sqlite3'
+        self.ocr = ocr
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, name TEXT, digest TEXT, text TEXT, status TEXT,
@@ -104,11 +111,13 @@ class Catalog:
                         digest = f'large:{path.stat().st_size}:{path.stat().st_mtime_ns}'
                     else:
                         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    digest = 'reader-v2:' + getattr(self.ocr, 'cache_key', 'no-ocr') + ':' + digest
                     old = db.execute('SELECT digest,text,status,genre FROM files WHERE path=?', (relative,)).fetchone()
-                    if old and old[0] == digest:
+                    if old and old[0] == digest and not any(marker in old[2] for marker in
+                                                          ('Ошибка', 'Частично', 'недоступно')):
                         text, status, kind = old[1:]
                     else:
-                        text, status = extract_text(path)
+                        text, status = extract_text(path, self.ocr)
                         kind = genre(text)
                 except Exception as error:
                     digest, text, status, kind = '', '', 'Ошибка чтения: ' + type(error).__name__, 'Не определён'

@@ -36,13 +36,13 @@ class CatalogTests(unittest.TestCase):
         with zipfile.ZipFile(self.root / 'resume.docx', 'w') as archive:
             archive.writestr('word/document.xml', '<w:document xmlns:w="urn:test"><w:p><w:r><w:t>Резюме инженера</w:t></w:r></w:p></w:document>')
         (self.root / 'broken.docx').write_bytes(b'not a zip')
-        (self.root / 'image.png').write_bytes(b'unsupported')
+        (self.root / 'archive.bin').write_bytes(b'unsupported')
         self.assertEqual(self.catalog.scan(), 3)
         self.assertEqual(self.catalog.search('инженера')[0]['genre'], 'Резюме')
         rows = {row['name']: row for row in self.catalog.search()}
         self.assertIn('Ошибка чтения', rows['broken.docx']['status'])
-        self.assertIn('не поддерживается', rows['image.png']['status'])
-        self.assertEqual(rows['image.png']['message_id'], '')
+        self.assertIn('не поддерживается', rows['archive.bin']['status'])
+        self.assertEqual(rows['archive.bin']['message_id'], '')
 
     def test_storage_boundary(self):
         with self.assertRaises(ValueError):

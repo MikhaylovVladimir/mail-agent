@@ -7,3 +7,4 @@ private/
 credentials*.json
 token*.json
 attachments/
+tmp/

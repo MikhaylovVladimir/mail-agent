@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from catalog import Catalog
 from contacts import Contacts, DRAFT_SYSTEM, validate_draft
+from document_reader import LocalOCR
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -347,6 +348,9 @@ class App:
         entry.pack(fill='x', pady=8)
         controls = ttk.Frame(frame)
         controls.pack(fill='x')
+        use_ocr = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text='Локальное OCR картинок и сканов через LM Studio (может занять время)',
+                        variable=use_ocr).pack(anchor='w')
         status = ttk.Label(frame, text='Нажмите «Сканировать хранилище» для добавления и обновления файлов.')
         status.pack(anchor='w', pady=8)
         tree = ttk.Treeview(frame, columns=('name', 'genre', 'sender', 'date', 'status'), show='headings', height=9)
@@ -398,6 +402,11 @@ class App:
                 messagebox.showinfo('Источник', 'Источник старого файла неизвестен. Повторный разбор письма сохранит связь.', parent=popup)
 
         def scan():
+            try:
+                catalog.ocr = LocalOCR(self.endpoint.get(), self.model.get()) if use_ocr.get() else None
+            except ValueError as error:
+                messagebox.showerror('OCR', str(error), parent=popup)
+                return
             scan_button.config(state='disabled')
             status.config(text='Сканирование локальных файлов…')
             def worker():
