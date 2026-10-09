@@ -40,7 +40,7 @@ class LMStudioTests(unittest.TestCase):
         self.assertEqual(draft['recipient'], 'anna@example.com')
 
     def test_request_selects_attachment_by_content(self):
-        root = Path(self.temp.name) / 'attachments'
+        root = Path(self.temp.name).resolve() / 'attachments'
         root.mkdir()
         report = root / 'document.txt'
         report.write_text('Отчёт за сентябрь 7500', encoding='utf-8')
