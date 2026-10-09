@@ -240,6 +240,15 @@ class App:
         for button in self.buttons:
             button.config(state='normal')
 
+    def apply_dictation(self, text):
+        # Every completed recording starts a separate letter request.
+        self.prompt.delete('1.0', 'end')
+        self.prompt.insert('1.0', text)
+        self.recipient.set('')
+        self.subject.set('')
+        self.body.delete('1.0', 'end')
+        self.clear_attachments()
+
     def cancel_voice(self):
         recorder, self.recorder = self.recorder, None
         try:
@@ -289,9 +298,8 @@ class App:
                 text, error = '', str(exc)
             def finish():
                 if text:
-                    prefix = '\n' if self.prompt.get('1.0', 'end').strip() else ''
-                    self.prompt.insert('end', prefix + text)
-                    self.log('Речь добавлена в запрос. Проверьте текст перед подготовкой черновика.')
+                    self.apply_dictation(text)
+                    self.log('Новый голосовой запрос. Предыдущий черновик очищен; проверьте текст.')
                 else:
                     self.log('Голосовой ввод: ' + error)
                 self.voice_idle()

@@ -2,12 +2,28 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import numpy as np
 from voice import Recorder, RATE, MAX_SECONDS, validate_model, transcribe
 
 
 class VoiceTests(unittest.TestCase):
+    def test_separate_dictation_clears_previous_letter(self):
+        from app import App
+        app = App.__new__(App)
+        app.prompt = Mock()
+        app.recipient = Mock()
+        app.subject = Mock()
+        app.body = Mock()
+        app.clear_attachments = Mock()
+        App.apply_dictation(app, 'Напиши тестовому пользователю: отчёт готов')
+        app.prompt.delete.assert_called_once_with('1.0', 'end')
+        app.prompt.insert.assert_called_once_with('1.0', 'Напиши тестовому пользователю: отчёт готов')
+        app.recipient.set.assert_called_once_with('')
+        app.subject.set.assert_called_once_with('')
+        app.body.delete.assert_called_once_with('1.0', 'end')
+        app.clear_attachments.assert_called_once_with()
+
     def test_missing_model_no_download(self):
         with self.assertRaises(ValueError):
             validate_model('')
