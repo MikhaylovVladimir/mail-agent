@@ -19,9 +19,10 @@ class LMStudioTests(unittest.TestCase):
         self.contacts.save('Иван Петров', 'ivan@example.com', ['начальник'])
         self.contacts.save('Анна Смирнова', 'anna@example.com', ['коллега'])
 
-    def prepare(self, request, override=''):
+    def prepare(self, request, override='', examples=()):
         payload = json.dumps({'request': request, 'recipient_override': override,
-                              'contacts': self.contacts.list(), 'provided_files': []}, ensure_ascii=False)
+                              'contacts': self.contacts.list(), 'provided_files': [],
+                              'style_examples': list(examples)}, ensure_ascii=False)
         answer = ask_model(os.environ.get('MAIL_AGENT_API', 'http://127.0.0.1:22227/v1'),
                            os.environ.get('MAIL_AGENT_MODEL', 'qwen3.5-4b'), DRAFT_SYSTEM, payload)
         return validate_draft(answer, self.contacts, request, override)
@@ -49,6 +50,13 @@ class LMStudioTests(unittest.TestCase):
         draft = self.prepare('Напиши начальнику, что отчёт готов, и приложи отчёт за сентябрь.')
         self.assertTrue(draft['attachment_queries'])
         self.assertEqual(select_attachments(catalog, draft['attachment_queries']), [str(report)])
+
+    def test_style_samples_do_not_supply_old_facts(self):
+        draft = self.prepare('Напиши начальнику, что новый отчёт готов. Без подписи.', examples=[
+            'Добрый день! Направляю счёт на 987654 рублей. Договор с компанией OldCompany согласован.'])
+        self.assertEqual(draft['recipient'], 'ivan@example.com')
+        self.assertNotIn('987654', draft['body'])
+        self.assertNotIn('OldCompany', draft['body'])
 
 
 if __name__ == '__main__':

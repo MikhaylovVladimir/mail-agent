@@ -16,6 +16,7 @@ from catalog import Catalog
 from contacts import Contacts, DRAFT_SYSTEM, validate_draft
 from document_reader import LocalOCR
 from attachment_selection import check_files, select_attachments, attachment_requested
+from style_history import sent_style_samples
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -53,12 +54,19 @@ def category_changes(category, labels, current):
 
 
 def ask_model(endpoint, model, system, prompt):
+    url = urllib.parse.urlsplit(endpoint)
+    if url.scheme != 'http' or url.hostname not in {'127.0.0.1', 'localhost', '::1'}:
+        raise ValueError('Модель должна работать через локальный HTTP-сервер LM Studio.')
     body = json.dumps({'model': model, 'temperature': 0.2,
                        'messages': [{'role': 'system', 'content': system},
                                     {'role': 'user', 'content': prompt}]}).encode()
     request = urllib.request.Request(endpoint.rstrip('/') + '/chat/completions',
                                      data=body, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=180) as response:
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=180) as response:
         return json.load(response)['choices'][0]['message']['content']
 
 
@@ -123,6 +131,9 @@ class App:
         ttk.Label(frame, text='Запрос: например «Напиши начальнику, что отчёт готов»').pack(anchor='w')
         self.prompt = tk.Text(frame, height=3)
         self.prompt.pack(fill='x')
+        self.use_style = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text='Учитывать стиль моих отправленных писем получателю (официальный тон)',
+                        variable=self.use_style).pack(anchor='w')
         for label, variable in [('Получатель: email, имя или псевдоним (можно оставить пустым для выбора из запроса)', self.recipient), ('Тема', self.subject)]:
             ttk.Label(frame, text=label).pack(anchor='w')
             ttk.Entry(frame, textvariable=variable).pack(fill='x')
@@ -160,6 +171,7 @@ class App:
         settings = {name: getattr(self, name).get() for name in ('endpoint', 'model', 'limit', 'folder', 'recipient')}
         settings['prompt'] = self.prompt.get('1.0', 'end').strip()
         settings['files'] = self.files.copy()
+        settings['use_style'] = self.use_style.get()
         for button in self.buttons:
             button.config(state='disabled')
         self.log('Выполняется: ' + ('подключение Gmail' if action == self.connect else 'обработка запроса'))
@@ -254,11 +266,27 @@ class App:
         override = settings.get('recipient', '').strip()
         if override:
             self.contacts.resolve(override)
-        prompt = json.dumps({'request': settings['prompt'], 'recipient_override': override,
-                             'contacts': self.contacts.list(),
-                             'provided_files': [Path(p).name for p in settings.get('files', [])]}, ensure_ascii=False)
+        context = {'request': settings['prompt'], 'recipient_override': override,
+                   'contacts': self.contacts.list(),
+                   'provided_files': [Path(p).name for p in settings.get('files', [])]}
+        prompt = json.dumps(context, ensure_ascii=False)
         result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM, prompt)
         draft = validate_draft(result, self.contacts, settings['prompt'], override)
+        if settings.get('use_style', False):
+            try:
+                samples = sent_style_samples(self.gmail, draft['recipient'])
+            except Exception as error:
+                samples = []
+                self.log('Историю стиля получить не удалось (' + type(error).__name__ + '); используется официальный тон.')
+            if samples:
+                self.log(f'Для стиля использовано отправленных писем: {len(samples)}.')
+                context['style_examples'] = samples
+                context['recipient_override'] = draft['recipient']
+                result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM,
+                                   json.dumps(context, ensure_ascii=False))
+                draft = validate_draft(result, self.contacts, settings['prompt'], draft['recipient'])
+            else:
+                self.log('Нет доступных текстовых образцов: используется официальный тон.')
         selected_files = settings.get('files', [])
         if attachment_requested(settings['prompt']) and not selected_files and not draft['attachment_queries']:
             raise ValueError('Запрошено вложение, но модель не указала поиск. Уточните запрос или выберите файл вручную.')
