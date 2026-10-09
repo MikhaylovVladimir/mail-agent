@@ -17,6 +17,7 @@ from contacts import Contacts, DRAFT_SYSTEM, validate_draft
 from document_reader import LocalOCR
 from attachment_selection import check_files, select_attachments, attachment_requested
 from style_history import sent_style_samples
+from mail_batch import collect_unprocessed
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -103,6 +104,7 @@ class App:
         self.window = window
         self.gmail = None
         self.files = []
+        self.stop_sorting = threading.Event()
         self.contacts = Contacts(PRIVATE / 'contacts.sqlite3')
         window.title('Локальный почтовый агент')
         window.geometry('1000x900')
@@ -128,6 +130,15 @@ class App:
             button = ttk.Button(row, text=label, command=lambda a=action: self.run(a))
             button.pack(side='left', padx=4)
             self.buttons.append(button)
+        bulk_row = ttk.Frame(frame)
+        bulk_row.pack(fill='x')
+        button = ttk.Button(bulk_row, text='Разобрать всю необработанную почту', command=lambda: self.run(self.sort_all))
+        button.pack(side='left', padx=4)
+        self.buttons.append(button)
+        self.stop_button = ttk.Button(bulk_row, text='Остановить разбор', state='disabled', command=self.request_stop)
+        self.stop_button.pack(side='left', padx=4)
+        self.sort_progress = ttk.Progressbar(bulk_row, mode='determinate', length=180)
+        self.sort_progress.pack(side='left', padx=8)
         ttk.Label(frame, text='Запрос: например «Напиши начальнику, что отчёт готов»').pack(anchor='w')
         self.prompt = tk.Text(frame, height=3)
         self.prompt.pack(fill='x')
@@ -172,6 +183,8 @@ class App:
         settings['prompt'] = self.prompt.get('1.0', 'end').strip()
         settings['files'] = self.files.copy()
         settings['use_style'] = self.use_style.get()
+        self.stop_sorting.clear()
+        self.stop_button.config(state='normal' if action in (self.sort, self.sort_all, self.resort) else 'disabled')
         for button in self.buttons:
             button.config(state='disabled')
         self.log('Выполняется: ' + ('подключение Gmail' if action == self.connect else 'обработка запроса'))
@@ -181,7 +194,11 @@ class App:
             except Exception as error:
                 self.log('Ошибка: ' + str(error))
             finally:
-                self.window.after(0, lambda: [b.config(state='normal') for b in self.buttons])
+                def finish():
+                    for button in self.buttons:
+                        button.config(state='normal')
+                    self.stop_button.config(state='disabled')
+                self.window.after(0, finish)
         threading.Thread(target=worker, daemon=True).start()
 
     def connect(self, settings):
@@ -192,7 +209,14 @@ class App:
     def resort(self, settings):
         self.sort(settings, reprocess=True)
 
-    def sort(self, settings, reprocess=False):
+    def request_stop(self):
+        self.stop_sorting.set()
+        self.log('Остановка запрошена; текущая операция завершится перед остановкой.')
+
+    def sort_all(self, settings):
+        self.sort(settings, all_mail=True)
+
+    def sort(self, settings, reprocess=False, all_mail=False):
         if not self.gmail:
             raise RuntimeError('Сначала подключите Gmail.')
         limit = int(settings['limit'])
@@ -209,12 +233,37 @@ class App:
         query = ('label:Agent/Обработано -label:Agent/Правила-v2' if reprocess
                  else '-label:Agent/Обработано')
         query += ' -in:trash -in:spam -in:sent -in:drafts'
-        batch = api.messages().list(userId='me', q=query, maxResults=limit).execute()
+        stop = getattr(self, 'stop_sorting', threading.Event())
+        if all_mail:
+            items = collect_unprocessed(api.messages(), limit, stop, self.log)
+            if stop.is_set():
+                self.log('Сбор списка остановлен. Письма не изменены; следующий запуск начнёт заново.')
+                return
+            batch = {'messages': items}
+        else:
+            batch = api.messages().list(userId='me', q=query, maxResults=limit).execute()
         self.log(f"Найдено писем: {len(batch.get('messages', []))}. "
                  + ('Повторный разбор старых категорий.' if reprocess else 'Разбор необработанных писем.'))
         completed = 0
+        invalid = 0
+        skipped = 0
+        total = len(batch.get('messages', []))
+        def progress(value):
+            if hasattr(self, 'sort_progress'):
+                self.window.after(0, lambda: self.sort_progress.config(maximum=max(1, total), value=value))
+        progress(0)
         for index, item in enumerate(batch.get('messages', []), 1):
+            if stop.is_set():
+                break
+            progress(index - 1)
+            self.log(f'Разбор: {index} из {total}; успешно: {completed}, пропущено: {skipped}, ошибок формата: {invalid}.')
             message = api.messages().get(userId='me', id=item['id'], format='full').execute()
+            current_labels = message.get('labelIds', [])
+            if (any(label in current_labels for label in ('TRASH', 'SPAM', 'SENT', 'DRAFT'))
+                    or (not reprocess and labels['Agent/Обработано'] in current_labels)
+                    or (reprocess and labels[VERSION_LABEL] in current_labels)):
+                skipped += 1
+                continue
             payload = message['payload']
             headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
             texts = [decode(p['body']['data']).decode('utf-8', errors='replace')
@@ -225,6 +274,7 @@ class App:
             self.log(f'{index}: анализируется «{title}»…')
             answer = ask_model(settings['endpoint'], settings['model'], CLASSIFY_SYSTEM, content).strip()
             if answer not in CATEGORIES:
+                invalid += 1
                 self.log(f'{index}: «{title}» — модель вернула неверный формат; письмо не изменено, можно повторить.')
                 continue
             category = answer
@@ -258,7 +308,12 @@ class App:
             self.log(f'{index}: «{title}» — {", ".join(previous) or "без категории"} → {category}')
             if 'Карантин' in previous and category != 'Карантин' and 'INBOX' not in current:
                 self.log('Письмо выведено из карантина; при необходимости верните его во входящие в Gmail.')
-        self.log(f'Готово: обработано {completed} писем. Следующий запуск продолжит выбранный разбор.')
+        attempted = completed + skipped + invalid
+        progress(attempted)
+        state = 'Остановлено' if stop.is_set() else 'Готово'
+        self.log(f'{state}: обработано {completed} писем; пропущено {skipped}; '
+                 f'ошибок формата {invalid}; осталось из списка {total - attempted}. '
+                 'Следующий запуск пропустит успешно обработанные письма.')
 
     def draft(self, settings):
         if not settings['prompt']:
