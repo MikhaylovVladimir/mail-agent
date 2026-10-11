@@ -649,6 +649,8 @@ class App:
 
 
 if __name__ == '__main__':
+    from interface import enable_dpi_awareness
+    enable_dpi_awareness()
     window = tk.Tk()
     App(window)
     window.mainloop()

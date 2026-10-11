@@ -2,22 +2,70 @@
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
+from PIL import Image, ImageDraw, ImageTk
+
+
+def enable_dpi_awareness():
+    """Call before Tk so Windows never stretches the rendered window bitmap."""
+    import sys
+    if sys.platform == 'win32':
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+
+
+def rounded_buttons(window, style, scale):
+    # Draw at the display's actual pixel density; keep references for Tk.
+    window.button_images = []
+    size = max(24, round(32 * scale))
+    border = round(8 * scale)
+    for name, colors in [('Soft', ('#e8edf5', '#dce5f1', '#eef1f6')),
+                         ('Accent', ('#365fdf', '#2b50c8', '#c5cede'))]:
+        images = []
+        for color in colors:
+            image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            ImageDraw.Draw(image).rounded_rectangle((0, 0, size-1, size-1), radius=border, fill=color)
+            photo = ImageTk.PhotoImage(image, master=window)
+            window.button_images.append(photo)
+            images.append(photo)
+        element = name + '.rounded'
+        style.element_create(element, 'image', images[0], ('disabled', images[2]),
+                             ('active', images[1]), border=border, sticky='nsew')
+        target = 'TButton' if name == 'Soft' else 'Primary.TButton'
+        style.layout(target, [(element, {'sticky': 'nsew', 'children': [
+            ('Button.padding', {'sticky': 'nsew', 'children': [
+                ('Button.focus', {'sticky': 'nsew', 'children': [
+                    ('Button.label', {'sticky': 'nsew'})]})]})]})])
+    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rounded_rectangle((0, 0, size-1, size-1), radius=border,
+                                            fill='white', outline='#d5ddea', width=max(1, round(scale)))
+    photo = ImageTk.PhotoImage(image, master=window)
+    window.button_images.append(photo)
+    style.element_create('Rounded.field', 'image', photo, border=border, sticky='nsew')
+    style.layout('TEntry', [('Rounded.field', {'sticky': 'nsew', 'children': [
+        ('Entry.padding', {'sticky': 'nsew', 'children': [('Entry.textarea', {'sticky': 'nsew'})]})]})])
 
 
 def build(app):
     window = app.window
-    window.tk.call('tk', 'scaling', 96 / 72)
-    window.geometry('1180x820')
-    window.minsize(1050, 740)
+    scale = window.winfo_fpixels('1i') / 96
+    window.geometry(f'{round(1100 * scale)}x{round(780 * scale)}')
+    window.minsize(round(1020 * scale), round(720 * scale))
     window.configure(bg='#f3f5fa')
     style = ttk.Style(window)
     style.theme_use('clam')
     style.configure('.', font=('Segoe UI', 10), background='#f3f5fa', foreground='#25324a')
-    style.configure('TButton', padding=(14, 9), background='#e7ecf5', borderwidth=0)
+    style.configure('TButton', padding=(round(12*scale), round(7*scale)), background='#e7ecf5', borderwidth=0)
     style.map('TButton', background=[('active', '#d9e3f4')])
     style.configure('Primary.TButton', background='#365fdf', foreground='white')
     style.map('Primary.TButton', background=[('active', '#284ec7'), ('disabled', '#c4cede')])
-    style.configure('Title.TLabel', font=('Segoe UI', 24, 'bold'))
+    rounded_buttons(window, style, scale)
+    for target in ('TButton', 'Primary.TButton'):
+        style.configure(target, background='#f3f5fa')
+        style.map(target, background=[])
+    style.configure('Title.TLabel', font=('Segoe UI', 21, 'bold'))
     style.configure('Muted.TLabel', foreground='#6a7890')
     style.configure('TEntry', padding=8, fieldbackground='white')
     style.configure('Treeview', rowheight=32, fieldbackground='white', background='white')
