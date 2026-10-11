@@ -50,6 +50,8 @@ def rounded_buttons(window, style, scale):
 
 def build(app):
     window = app.window
+    from shortcuts import install
+    install(window)
     scale = window.winfo_fpixels('1i') / 96
     window.geometry(f'{round(1100 * scale)}x{round(780 * scale)}')
     window.minsize(round(1020 * scale), round(720 * scale))
@@ -107,6 +109,7 @@ def build(app):
 
     def text(parent, height):
         widget = ScrolledText(parent, height=height, font=('Segoe UI', 11), wrap='word',
+                              undo=True, autoseparators=True, maxundo=100,
                               relief='flat', bd=0, padx=14, pady=12, background='white',
                               foreground='#25324a', insertbackground='#365fdf')
         return widget
