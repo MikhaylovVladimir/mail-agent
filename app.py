@@ -117,68 +117,26 @@ class App:
         self.recipient = tk.StringVar()
         self.subject = tk.StringVar()
         self.folder = tk.StringVar(value=str(PRIVATE / 'attachments'))
-        frame = ttk.Frame(window, padding=16)
-        frame.pack(fill='both', expand=True)
-        for label, variable in [('LM Studio API', self.endpoint), ('ID загруженной модели', self.model),
-                                ('Писем за один запуск', self.limit), ('Папка вложений', self.folder)]:
-            ttk.Label(frame, text=label).pack(anchor='w')
-            ttk.Entry(frame, textvariable=variable).pack(fill='x')
-        self.buttons = []
-        ttk.Button(frame, text='Каталог вложений и поиск', command=self.open_catalog).pack(anchor='w', pady=4)
-        ttk.Button(frame, text='Контакты и псевдонимы', command=self.open_contacts).pack(anchor='w', pady=4)
-        row = ttk.Frame(frame)
-        row.pack(fill='x', pady=10)
-        for label, action in [('Подключить Gmail', self.connect), ('Разобрать почту', self.sort),
-                              ('Пересортировать по новым правилам', self.resort)]:
-            button = ttk.Button(row, text=label, command=lambda a=action: self.run(a))
-            button.pack(side='left', padx=4)
-            self.buttons.append(button)
-        bulk_row = ttk.Frame(frame)
-        bulk_row.pack(fill='x')
-        button = ttk.Button(bulk_row, text='Разобрать всю необработанную почту', command=lambda: self.run(self.sort_all))
-        button.pack(side='left', padx=4)
-        self.buttons.append(button)
-        self.stop_button = ttk.Button(bulk_row, text='Остановить разбор', state='disabled', command=self.request_stop)
-        self.stop_button.pack(side='left', padx=4)
-        self.sort_progress = ttk.Progressbar(bulk_row, mode='determinate', length=180)
-        self.sort_progress.pack(side='left', padx=8)
-        ttk.Label(frame, text='Запрос: например «Напиши начальнику, что отчёт готов»').pack(anchor='w')
-        self.prompt = tk.Text(frame, height=3)
-        self.prompt.pack(fill='x')
-        voice_row = ttk.Frame(frame)
-        voice_row.pack(fill='x', pady=4)
-        self.voice_button = ttk.Button(voice_row, text='Диктовать запрос', command=self.dictate)
-        self.voice_button.pack(side='left')
-        self.voice_cancel = ttk.Button(voice_row, text='Отменить запись', state='disabled', command=self.cancel_voice)
-        self.voice_cancel.pack(side='left', padx=8)
-        self.voice_settings = ttk.Button(voice_row, text='Модель речи…', command=self.choose_voice_model)
-        self.voice_settings.pack(side='left')
-        self.use_style = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text='Учитывать стиль моих отправленных писем получателю (официальный тон)',
-                        variable=self.use_style).pack(anchor='w')
-        for label, variable in [('Получатель: email, имя или псевдоним (можно оставить пустым для выбора из запроса)', self.recipient), ('Тема', self.subject)]:
-            ttk.Label(frame, text=label).pack(anchor='w')
-            ttk.Entry(frame, textvariable=variable).pack(fill='x')
-        self.body = tk.Text(frame, height=10)
-        self.body.pack(fill='both', expand=True, pady=8)
-        row = ttk.Frame(frame)
-        row.pack(fill='x')
-        button = ttk.Button(row, text='Написать черновик', command=lambda: self.run(self.draft))
-        button.pack(side='left')
-        self.buttons.append(button)
-        ttk.Button(row, text='Прикрепить файлы', command=self.attach).pack(side='left', padx=8)
-        button = ttk.Button(row, text='Проверить и отправить', command=self.send)
-        button.pack(side='left')
-        self.buttons.append(button)
-        self.attachments = ttk.Label(frame, text='Вложений нет')
-        self.attachments.pack(anchor='w')
-        ttk.Button(frame, text='Убрать все вложения', command=self.clear_attachments).pack(anchor='w')
-        self.status = ttk.Label(frame, text='Готово. Сначала загрузите модель в LM Studio и включите сервер.')
-        self.status.pack(anchor='w', pady=10)
-        ttk.Label(frame, text='Журнал действий').pack(anchor='w')
-        self.journal = ScrolledText(frame, height=6, state='disabled', wrap='word')
-        self.journal.pack(fill='x')
+        from interface import build
+        build(self)
         window.protocol('WM_DELETE_WINDOW', self.close)
+
+    def show_page(self, name):
+        page = self.pages[name]
+        if name in ('Контакты', 'Вложения') and len(page.winfo_children()) == 1:
+            if name == 'Контакты':
+                self.open_contacts(page)
+            else:
+                self.open_catalog(page)
+        page.tkraise()
+        for title, button in self.nav_buttons.items():
+            button.config(style='Primary.TButton' if title == name else 'TButton')
+
+    def new_letter(self):
+        if self.prompt.get('1.0', 'end').strip() or self.body.get('1.0', 'end').strip():
+            if not messagebox.askyesno('Новое письмо', 'Очистить текущий запрос, черновик и выбранные вложения?'):
+                return
+        self.apply_dictation('')
 
     def close(self):
         if self.recorder:
@@ -469,10 +427,11 @@ class App:
         self.files = []
         self.attachments.config(text='Вложений нет')
 
-    def open_contacts(self):
-        popup = tk.Toplevel(self.window)
-        popup.title('Подтверждённые контакты')
-        popup.geometry('780x500')
+    def open_contacts(self, parent=None):
+        popup = parent if parent is not None else tk.Toplevel(self.window)
+        if parent is None:
+            popup.title('Подтверждённые контакты')
+            popup.geometry('780x500')
         frame = ttk.Frame(popup, padding=12)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='Сохранение подтверждает соответствие имени и псевдонимов указанному адресу.').pack(anchor='w')
@@ -529,7 +488,10 @@ class App:
         def use():
             if current[0] is not None:
                 self.recipient.set(records[str(current[0])]['email'])
-                popup.destroy()
+                if parent is None:
+                    popup.destroy()
+                else:
+                    self.show_page('????? ??????')
 
         controls = ttk.Frame(frame)
         controls.pack(fill='x', pady=10)
@@ -538,11 +500,12 @@ class App:
         tree.bind('<<TreeviewSelect>>', choose)
         refresh()
 
-    def open_catalog(self):
+    def open_catalog(self, parent=None):
         catalog = Catalog(self.folder.get())
-        popup = tk.Toplevel(self.window)
-        popup.title('Почтовые вложения — локальный каталог')
-        popup.geometry('1050x650')
+        popup = parent if parent is not None else tk.Toplevel(self.window)
+        if parent is None:
+            popup.title('Почтовые вложения — локальный каталог')
+            popup.geometry('1050x650')
         frame = ttk.Frame(popup, padding=12)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text=f'Хранилище: {catalog.root}', wraplength=1000).pack(anchor='w')
