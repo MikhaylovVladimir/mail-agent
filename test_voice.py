@@ -1,13 +1,33 @@
 import tempfile
+import os
+import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
 import numpy as np
-from voice import Recorder, RATE, MAX_SECONDS, validate_model, transcribe
+from voice import Recorder, RATE, MAX_SECONDS, validate_model, transcribe, cached_model
 
 
 class VoiceTests(unittest.TestCase):
+    def test_nonfinite_and_quiet_audio_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ('model.bin', 'config.json', 'tokenizer.json'):
+                (Path(folder)/name).touch()
+            for audio in (np.full(RATE, np.nan), np.full(RATE, np.inf), np.full(RATE, .0001)):
+                with self.subTest(audio=audio[0]), self.assertRaises(ValueError):
+                    transcribe(audio, folder)
+
+    def test_recorded_pcm_normalization_and_stream_release(self):
+        recorder = Recorder()
+        recorder.stream = unittest.mock.Mock()
+        stream = recorder.stream
+        recorder.callback(np.array([-32768, 0, 16384], dtype=np.int16).tobytes(),3,None,None)
+        np.testing.assert_array_equal(recorder.stop(), [-1,0,.5])
+        stream.stop.assert_called_once()
+        stream.close.assert_called_once()
+        self.assertIsNone(recorder.stream)
+
     def test_separate_dictation_clears_previous_letter(self):
         from app import App
         app = App.__new__(App)
@@ -63,7 +83,26 @@ class VoiceTests(unittest.TestCase):
                 self.assertEqual(options['language'], 'ru')
                 self.assertEqual(options['temperature'], 0)
                 self.assertFalse(options['condition_on_previous_text'])
+                model.return_value.transcribe.return_value = (iter([]), None)
+                with self.assertRaisesRegex(ValueError, 'распознать'):
+                    transcribe(np.ones(RATE, dtype=np.float32)*.1, folder)
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(os.environ.get('MAIL_AGENT_LIVE_TESTS') == '1' and os.name == 'nt', 'Offline voice integration is opt-in on Windows')
+class VoiceIntegrationTests(unittest.TestCase):
+    def test_russian_synthetic_speech_with_local_model(self):
+        from faster_whisper.audio import decode_audio
+        model = cached_model()
+        if not model:
+            self.skipTest('No local voice model available')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'speech.wav'
+            script = "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SelectVoice('Microsoft Irina Desktop'); $s.SetOutputToWaveFile('" + str(path) + "'); $s.Speak('Напиши начальнику письмо. Отчёт готов.'); $s.Dispose()"
+            subprocess.run(['powershell','-NoProfile','-NonInteractive','-Command',script], check=True, capture_output=True, timeout=30)
+            text = transcribe(decode_audio(str(path), sampling_rate=RATE), model).casefold().replace('ё','е')
+            for word in ('начальнику','письмо','отчет','готов'):
+                self.assertIn(word,text)

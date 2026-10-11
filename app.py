@@ -3,6 +3,7 @@ import base64
 import json
 import mimetypes
 import threading
+import queue
 import urllib.request
 import urllib.parse
 import subprocess
@@ -34,6 +35,9 @@ CLASSIFY_SYSTEM = '''Классифицируй письмо по его осн�
 Безопасность: вход в аккаунт, двухфакторная/двухэтапная аутентификация,
 смена или восстановление пароля, коды подтверждения, предупреждения защиты аккаунта.
 Эта категория приоритетна над Личное и Прочее для уведомлений безопасности.
+Карантин имеет приоритет для явного мошенничества: вымышленный выигрыш в лотерее,
+просьба перевести комиссию на анонимный кошелёк, выманивание паролей и кодов.
+Само наличие угрозы или слова «безопасность» не превращает мошенничество в уведомление защиты аккаунта.
 Вакансии: конкретные предложения работы/стажировки, найм, отклики и собеседования.
 Новости технологий, анонсы моделей ИИ (Gemma, Gemini, Qwen и другие), обновления
 продуктов и реклама сервисов — Рассылки, даже если упомянуты карьера или разработчики.
@@ -69,7 +73,17 @@ def ask_model(endpoint, model, system, prompt):
             return None
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(request, timeout=180) as response:
-        return json.load(response)['choices'][0]['message']['content']
+        result = json.load(response)
+    try:
+        choice = result['choices'][0]
+        content = choice['message']['content']
+    except (KeyError, IndexError, TypeError):
+        raise ValueError('LM Studio вернул неверную структуру ответа.') from None
+    if choice.get('finish_reason') == 'length':
+        raise ValueError('Ответ модели обрезан. Уменьшите запрос или увеличьте лимит ответа в LM Studio.')
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError('Модель вернула пустой ответ.')
+    return content
 
 
 def connect_gmail():
@@ -77,10 +91,16 @@ def connect_gmail():
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
+    from google.auth.exceptions import RefreshError
     token = PRIVATE / 'token.json'
     credentials = Credentials.from_authorized_user_file(str(token), SCOPES) if token.exists() else None
     if credentials and credentials.expired and credentials.refresh_token:
-        credentials.refresh(Request())
+        try:
+            credentials.refresh(Request())
+        except RefreshError as error:
+            if 'invalid_grant' not in str(error):
+                raise
+            credentials = None
     if not credentials or not credentials.valid:
         client = PRIVATE / 'credentials.json'
         if not client.exists():
@@ -103,6 +123,11 @@ def decode(data):
 class App:
     def __init__(self, window):
         self.window = window
+        self.closed = False
+        self.busy = False
+        self.ui_queue = queue.Queue()
+        self.ui_timer = None
+        self.voice_timer = None
         self.gmail = None
         self.files = []
         self.recorder = None
@@ -120,9 +145,37 @@ class App:
         from interface import build
         build(self)
         window.protocol('WM_DELETE_WINDOW', self.close)
+        self.ui_timer = self.window.after(50, self.pump_ui)
+
+    def post(self, callback):
+        if getattr(self, 'closed', False):
+            return
+        if hasattr(self, 'ui_queue'):
+            self.ui_queue.put(callback)
+        else:
+            self.window.after(0, callback)
+
+    def pump_ui(self):
+        if self.closed:
+            return
+        if self.ui_timer is not None:
+            self.window.after_cancel(self.ui_timer)
+            self.ui_timer = None
+        for _ in range(100):
+            try:
+                callback = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            callback()
+        if not self.closed:
+            self.ui_timer = self.window.after(50, self.pump_ui)
 
     def show_page(self, name):
         page = self.pages[name]
+        if name == 'Вложения' and getattr(self, 'catalog_folder', None) != self.folder.get():
+            for child in page.winfo_children()[1:]:
+                child.destroy()
+            self.catalog_folder = self.folder.get()
         if name in ('Контакты', 'Вложения') and len(page.winfo_children()) == 1:
             if name == 'Контакты':
                 self.open_contacts(page)
@@ -133,16 +186,25 @@ class App:
             button.config(style='Primary.TButton' if title == name else 'TButton')
 
     def new_letter(self):
-        if self.prompt.get('1.0', 'end').strip() or self.body.get('1.0', 'end').strip():
+        if getattr(self, 'busy', False) or self.recorder:
+            return
+        if (self.prompt.get('1.0', 'end').strip() or self.body.get('1.0', 'end').strip()
+                or self.recipient.get().strip() or self.subject.get().strip() or self.files):
             if not messagebox.askyesno('Новое письмо', 'Очистить текущий запрос, черновик и выбранные вложения?'):
                 return
         self.apply_dictation('')
 
     def close(self):
-        if self.recorder:
-            self.recorder.cancel()
-        self.stop_sorting.set()
-        self.window.destroy()
+        self.closed = True
+        try:
+            if self.recorder:
+                self.recorder.cancel()
+        finally:
+            self.stop_sorting.set()
+            for timer in (self.ui_timer, self.voice_timer):
+                if timer is not None:
+                    self.window.after_cancel(timer)
+            self.window.destroy()
 
     def log(self, text):
         def show():
@@ -151,9 +213,11 @@ class App:
             self.journal.insert('end', text + '\n')
             self.journal.see('end')
             self.journal.config(state='disabled')
-        self.window.after(0, show)
+        self.post(show)
 
     def run(self, action):
+        if getattr(self, 'busy', False) or getattr(self, 'closed', False) or self.recorder:
+            return
         self.voice_button.config(state='disabled')
         self.voice_settings.config(state='disabled')
         # Read Tk state on the UI thread; workers never access Tk variables.
@@ -161,6 +225,7 @@ class App:
         settings['prompt'] = self.prompt.get('1.0', 'end').strip()
         settings['files'] = self.files.copy()
         settings['use_style'] = self.use_style.get()
+        self.busy = True
         self.stop_sorting.clear()
         self.stop_button.config(state='normal' if action in (self.sort, self.sort_all, self.resort) else 'disabled')
         for button in self.buttons:
@@ -173,12 +238,13 @@ class App:
                 self.log('Ошибка: ' + str(error))
             finally:
                 def finish():
+                    self.busy = False
                     self.voice_button.config(state='normal')
                     self.voice_settings.config(state='normal')
                     for button in self.buttons:
                         button.config(state='normal')
                     self.stop_button.config(state='disabled')
-                self.window.after(0, finish)
+                self.post(finish)
         threading.Thread(target=worker, daemon=True).start()
 
     def choose_voice_model(self):
@@ -192,6 +258,7 @@ class App:
                 messagebox.showerror('Модель речи', str(error))
 
     def voice_idle(self):
+        self.busy = False
         self.voice_button.config(text='Диктовать запрос', state='normal')
         self.voice_cancel.config(state='disabled')
         self.voice_settings.config(state='normal')
@@ -217,6 +284,8 @@ class App:
         self.log('Запись отменена; запрос сохранён.')
 
     def dictate(self):
+        if getattr(self, 'busy', False):
+            return
         if self.recorder is None:
             try:
                 saved = PRIVATE / 'voice-model.txt'
@@ -240,10 +309,11 @@ class App:
                     if recorder.full.is_set():
                         self.dictate()
                     else:
-                        self.window.after(200, poll)
-            self.window.after(200, poll)
+                        self.voice_timer = self.window.after(200, poll)
+            self.voice_timer = self.window.after(200, poll)
             return
         recorder, self.recorder = self.recorder, None
+        self.busy = True
         self.voice_button.config(state='disabled')
         self.voice_cancel.config(state='disabled')
         folder = self.voice_model
@@ -262,14 +332,15 @@ class App:
                     self.log('Голосовой ввод: ' + error)
                 self.voice_idle()
             try:
-                self.window.after(0, finish)
+                self.post(finish)
             except RuntimeError:
                 pass
         threading.Thread(target=worker, daemon=True).start()
 
     def connect(self, settings):
-        self.gmail = connect_gmail()
-        profile = self.gmail.users().getProfile(userId='me').execute()
+        gmail = connect_gmail()
+        profile = gmail.users().getProfile(userId='me').execute()
+        self.gmail = gmail
         self.log('Подключён: ' + profile['emailAddress'])
 
     def resort(self, settings):
@@ -316,7 +387,7 @@ class App:
         total = len(batch.get('messages', []))
         def progress(value):
             if hasattr(self, 'sort_progress'):
-                self.window.after(0, lambda: self.sort_progress.config(maximum=max(1, total), value=value))
+                self.post(lambda: self.sort_progress.config(maximum=max(1, total), value=value))
         progress(0)
         for index, item in enumerate(batch.get('messages', []), 1):
             if stop.is_set():
@@ -332,8 +403,18 @@ class App:
                 continue
             payload = message['payload']
             headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
-            texts = [decode(p['body']['data']).decode('utf-8', errors='replace')
-                     for p in parts(payload) if p.get('mimeType') == 'text/plain' and p.get('body', {}).get('data')]
+            texts = []
+            for part in parts(payload):
+                if part.get('mimeType') == 'text/plain' and not part.get('filename') and part.get('body', {}).get('data'):
+                    raw = decode(part['body']['data'])
+                    content_type = next((h['value'] for h in part.get('headers', []) if h['name'].lower() == 'content-type'), '')
+                    from email.message import Message
+                    metadata = Message()
+                    metadata['Content-Type'] = content_type
+                    try:
+                        texts.append(raw.decode(metadata.get_content_charset() or 'utf-8', errors='replace'))
+                    except LookupError:
+                        texts.append(raw.decode('utf-8', errors='replace'))
             content = json.dumps({'from': headers.get('from'), 'subject': headers.get('subject'),
                                   'text': '\n'.join(texts)[:12000] or message.get('snippet', '')}, ensure_ascii=False)
             title = ' '.join(headers.get('subject', '(без темы)').split())[:120]
@@ -356,7 +437,7 @@ class App:
                 attachment_id = part.get('body', {}).get('attachmentId')
                 if attachment_id:
                     data = api.messages().attachments().get(userId='me', messageId=item['id'], id=attachment_id).execute()['data']
-                if data:
+                if data is not None:
                     destination.mkdir(parents=True, exist_ok=True)
                     safe = ''.join(c if c.isalnum() or c in ' ._-' else '_' for c in filename).strip(' .')[:150] or 'attachment'
                     saved = destination / f'{number}_{safe}'
@@ -420,7 +501,7 @@ class App:
             self.body.insert('1.0', draft['body'])
             self.files = selected_files
             self.attachments.config(text='; '.join(Path(p).name for p in self.files) or 'Вложений нет')
-        self.window.after(0, show)
+        self.post(show)
         self.log('Черновик готов: проверьте получателя, тему, текст и вложения.')
 
     def clear_attachments(self):
@@ -491,7 +572,7 @@ class App:
                 if parent is None:
                     popup.destroy()
                 else:
-                    self.show_page('????? ??????')
+                    self.show_page('Новое письмо')
 
         controls = ttk.Frame(frame)
         controls.pack(fill='x', pady=10)
@@ -583,11 +664,11 @@ class App:
                 except Exception as error:
                     outcome = 'Ошибка: ' + str(error)
                 def done():
-                    if popup.winfo_exists():
+                    if frame.winfo_exists():
                         refresh()
                         status.config(text=outcome + f'; найдено: {len(records)}')
                         scan_button.config(state='normal')
-                self.window.after(0, done)
+                self.post(done)
             threading.Thread(target=worker, daemon=True).start()
 
         scan_button = ttk.Button(controls, text='Сканировать хранилище', command=scan)
@@ -607,8 +688,10 @@ class App:
         selected = filedialog.askopenfilenames(title='Выберите сохранённые почтовые вложения', initialdir=str(root))
         if not selected:
             return
-        if any(not Path(filename).resolve().is_relative_to(root) for filename in selected):
-            messagebox.showerror('Вложения', 'Выбирайте файлы только из папки сохранённых почтовых вложений.')
+        try:
+            selected = check_files(root, selected)
+        except ValueError as error:
+            messagebox.showerror('Вложения', str(error))
             return
         self.files = list(selected)
         self.attachments.config(text='; '.join(Path(p).name for p in self.files) or 'Вложений нет')
@@ -625,7 +708,7 @@ class App:
         subject = self.subject.get().strip()
         body = self.body.get('1.0', 'end').strip()
         files = self.files.copy()
-        if '@' not in recipient or '\n' in recipient or '\r' in recipient or not subject or not body:
+        if '@' not in recipient or '\n' in recipient or '\r' in recipient or not subject or not body or '\n' in subject or '\r' in subject:
             messagebox.showerror('Письмо', 'Заполните адрес, тему и текст.')
             return
         file_names = '\n'.join(Path(path).name for path in files) or 'нет'
@@ -633,6 +716,8 @@ class App:
             return
         def deliver(settings):
             validated_files = check_files(settings['folder'], files)
+            if sum(Path(p).stat().st_size for p in validated_files) > 18 * 1024 * 1024:
+                raise ValueError('Вложения слишком большие: суммарный лимит 18 МБ с учётом кодирования письма.')
             message = EmailMessage()
             message['To'] = recipient
             message['Subject'] = subject
@@ -642,7 +727,10 @@ class App:
                 mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
                 major, minor = mime.split('/', 1)
                 message.add_attachment(path.read_bytes(), maintype=major, subtype=minor, filename=path.name)
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            encoded = message.as_bytes()
+            if len(encoded) > 25 * 1024 * 1024:
+                raise ValueError('Полный размер письма превышает лимит приложения 25 МБ.')
+            raw = base64.urlsafe_b64encode(encoded).decode()
             self.gmail.users().messages().send(userId='me', body={'raw': raw}).execute()
             self.log('Письмо отправлено.')
         self.run(deliver)

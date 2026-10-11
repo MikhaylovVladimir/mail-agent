@@ -60,6 +60,7 @@ class Catalog:
         self.db = self.root / '.catalog.sqlite3'
         self.ocr = ocr
         with self.connect() as db:
+            db.execute('PRAGMA journal_mode=WAL')
             db.execute('''CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, name TEXT, digest TEXT, text TEXT, status TEXT,
                 genre TEXT, sender TEXT, date TEXT, subject TEXT, message_id TEXT,
@@ -79,9 +80,11 @@ class Catalog:
         if not resolved.is_relative_to(self.root):
             raise ValueError('Файл вне хранилища')
         sidecar = resolved.parent / '.source.json'
-        if sidecar.exists():
-            sources = json.loads(sidecar.read_text(encoding='utf-8'))
-        else:
+        try:
+            sources = json.loads(sidecar.read_text(encoding='utf-8')) if sidecar.exists() else {}
+        except (ValueError, OSError):
+            sources = {}
+        if not isinstance(sources, dict):
             sources = {}
         sources[resolved.name] = source
         temporary = sidecar.with_suffix('.tmp')
@@ -93,7 +96,7 @@ class Catalog:
         with self.connect() as db:
             db.execute('UPDATE files SET active=0')
             for path in self.root.rglob('*'):
-                if not path.is_file() or path.name.startswith('.'):
+                if not path.is_file() or any(part.startswith('.') for part in path.relative_to(self.root).parts):
                     continue
                 resolved = path.resolve()
                 if not resolved.is_relative_to(self.root):
@@ -103,7 +106,9 @@ class Catalog:
                 sidecar = path.parent / '.source.json'
                 if sidecar.exists():
                     try:
-                        source = json.loads(sidecar.read_text(encoding='utf-8')).get(path.name, {})
+                        metadata = json.loads(sidecar.read_text(encoding='utf-8'))
+                        candidate = metadata.get(path.name, {}) if isinstance(metadata, dict) else {}
+                        source = candidate if isinstance(candidate, dict) else {}
                     except (ValueError, OSError):
                         pass
                 try:
@@ -122,9 +127,9 @@ class Catalog:
                 except Exception as error:
                     digest, text, status, kind = '', '', 'Ошибка чтения: ' + type(error).__name__, 'Не определён'
                 db.execute('''INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,1)''',
-                           (relative, source.get('filename', path.name), digest, text, status, kind,
-                            source.get('sender', ''), source.get('date', ''), source.get('subject', ''),
-                            source.get('message_id', '')))
+                           (relative, str(source.get('filename', path.name)), digest, text, status, kind,
+                            str(source.get('sender', '')), str(source.get('date', '')), str(source.get('subject', '')),
+                            str(source.get('message_id', ''))))
                 count += 1
         return count
 
