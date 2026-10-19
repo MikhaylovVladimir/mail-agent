@@ -413,3 +413,5 @@ pip check успешен; pip-audit не выявил известных уяз�
 
 
 CI выявил ошибку кодировки отчёта на английской Windows (cp1252). Вывод исправлен; существующий тест дополнен запуском с такой кодировкой.
+
+GitHub Actions beta.2: обе проверки успешны — https://github.com/MikhaylovVladimir/mail-agent/actions/runs/39250864026 и https://github.com/MikhaylovVladimir/mail-agent/actions/runs/39250863967 (124 обычных теста, 10 локальных интеграционных пропущены). Повторный локальный запуск без opt-in интеграций: те же 124 проверки успешны.
