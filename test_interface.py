@@ -187,10 +187,10 @@ class InterfaceTests(unittest.TestCase):
     def test_attach_cancel_and_hidden_file_rejected(self):
         hidden = Path(self.temp.name)/'.secret'
         hidden.write_text('secret')
-        with patch('app.filedialog.askopenfilenames', return_value=()):
+        with patch('app.choose_attachments', return_value=()):
             self.app.attach()
         self.assertFalse(self.app.files)
-        with patch('app.filedialog.askopenfilenames', return_value=[str(hidden)]), patch('app.messagebox.showerror') as error:
+        with patch('app.choose_attachments', return_value=[str(hidden)]), patch('app.messagebox.showerror') as error:
             self.app.attach()
         error.assert_called_once()
         self.assertFalse(self.app.files)
@@ -198,11 +198,21 @@ class InterfaceTests(unittest.TestCase):
     def test_attach_valid_file_and_clear(self):
         path = Path(self.temp.name)/'report.txt'
         path.write_text('report')
-        with patch('app.filedialog.askopenfilenames', return_value=[str(path)]):
+        with patch('app.choose_attachments', return_value=[str(path)]):
             self.app.attach()
         self.assertEqual(len(self.app.files), 1)
         self.app.clear_attachments()
         self.assertFalse(self.app.files)
+
+    def test_add_another_attachment_preserves_previous_selection(self):
+        first=Path(self.temp.name)/'first.txt'
+        second=Path(self.temp.name)/'second.txt'
+        first.write_text('first')
+        second.write_text('second')
+        self.app.files=[str(first.resolve())]
+        with patch('app.choose_attachments',return_value=[str(second)]):
+            self.app.attach()
+        self.assertEqual(self.app.files,[str(first.resolve()),str(second.resolve())])
 
     def test_voice_cancel_preserves_previous_draft(self):
         self.app.body.insert('1.0','Старое письмо')

@@ -29,7 +29,8 @@ def make_message(case, recipient, run_id):
     return message
 
 
-def run(gmail, endpoint, model, directory, log=print, manifest=None):
+def run(gmail, endpoint, model, directory, log=print, manifest=None, cases=None, reclassify=False):
+    cases = CASES if cases is None else cases
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     manifest = Path(manifest) if manifest else directory/'manifest.json'
@@ -52,7 +53,7 @@ def run(gmail, endpoint, model, directory, log=print, manifest=None):
         label = api.labels().create(userId='me', body={'name':'AgentTest/'+state['run_id']}).execute()
         state['label_id'] = label['id']
     done = {item['case'] for item in state['cases']}
-    for case in CASES:
+    for case in cases:
         if case[0] in done:
             continue
         message = make_message(case, recipient, state['run_id'])
@@ -61,6 +62,17 @@ def run(gmail, endpoint, model, directory, log=print, manifest=None):
         state['cases'].append({'case':case[0], 'expected':case[1], 'id':imported['id']})
         manifest.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
         log('Добавлено тестовых писем: '+str(len(state['cases'])))
+    if reclassify:
+        from app import VERSION_LABEL
+        labels = {row['name']:row['id'] for row in api.labels().list(userId='me').execute()['labels']}
+        markers = [labels[name] for name in ('Agent/Обработано',VERSION_LABEL) if name in labels]
+        for item in state['cases']:
+            message = api.messages().get(userId='me',id=item['id'],format='metadata',metadataHeaders=['X-Mail-Agent-Test']).execute()
+            headers = {h['name'].casefold():h['value'] for h in message.get('payload',{}).get('headers',[])}
+            if headers.get('x-mail-agent-test') != state['run_id']:
+                raise ValueError('Сброс меток разрешён только сообщениям текущего синтетического набора.')
+            if markers:
+                api.messages().modify(userId='me',id=item['id'],body={'removeLabelIds':markers}).execute()
     app = App.__new__(App)
     app.gmail, app.log, app.stop_sorting = gmail, log, threading.Event()
     app.sort({'limit':'100', 'endpoint':endpoint, 'model':model,
@@ -70,7 +82,7 @@ def run(gmail, endpoint, model, directory, log=print, manifest=None):
     for item in state['cases']:
         message = api.messages().get(userId='me', id=item['id'], format='metadata', metadataHeaders=['X-Mail-Agent-Test']).execute()
         actual = [labels.get(label, '')[6:] for label in message.get('labelIds', [])
-                  if labels.get(label, '').startswith('Agent/') and labels.get(label, '')[6:] in {c[1] for c in CASES}]
+                  if labels.get(label, '').startswith('Agent/') and labels.get(label, '')[6:] in {c[1] for c in cases}]
         results.append({**item, 'actual':actual, 'passed':actual == [item['expected']]})
     report = {'run_id':state['run_id'], 'total':len(results), 'passed':sum(row['passed'] for row in results), 'results':results}
     (directory/'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

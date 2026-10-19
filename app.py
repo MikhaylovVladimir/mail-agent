@@ -21,6 +21,7 @@ from style_history import sent_style_samples
 from mail_batch import collect_unprocessed
 from voice import Recorder, cached_model, validate_model, transcribe
 from greeting import compose_body, without_greeting, without_signature
+from attachment_picker import choose_attachments, attachment_name
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -40,6 +41,8 @@ CLASSIFY_SYSTEM = '''Классифицируй письмо по его осн�
 просьба перевести комиссию на анонимный кошелёк, выманивание паролей и кодов.
 Само наличие угрозы или слова «безопасность» не превращает мошенничество в уведомление защиты аккаунта.
 Вакансии: конкретные предложения работы/стажировки, найм, отклики и собеседования.
+Переписка рекрутера о резюме и вакансии, отказы после собеседования и выбор другого
+кандидата тоже относятся к Вакансии, а не Работа. Работа — задачи уже действующего проекта.
 Новости технологий, анонсы моделей ИИ (Gemma, Gemini, Qwen и другие), обновления
 продуктов и реклама сервисов — Рассылки, даже если упомянуты карьера или разработчики.
 Конференции: приглашения и регистрация на конференции, вебинары и профессиональные мероприятия.
@@ -544,7 +547,7 @@ class App:
             self.body.delete('1.0', 'end')
             self.body.insert('1.0', draft['body'])
             self.files = selected_files
-            self.attachments.config(text='; '.join(Path(p).name for p in self.files) or 'Вложений нет')
+            self.attachments.config(text='; '.join(attachment_name(settings['folder'],p) for p in self.files) or 'Вложений нет')
         self.post(show)
         self.log('Черновик готов: проверьте получателя, тему, текст и вложения.')
 
@@ -732,16 +735,16 @@ class App:
         if not root.is_dir():
             messagebox.showinfo('Вложения', 'Пока нет папки сохранённых вложений. Сначала разберите письма с файлами.')
             return
-        selected = filedialog.askopenfilenames(title='Выберите сохранённые почтовые вложения', initialdir=str(root))
+        selected = choose_attachments(self.window, root, self.files)
         if not selected:
             return
         try:
-            selected = check_files(root, selected)
+            selected = check_files(root, [*self.files, *selected])
         except ValueError as error:
             messagebox.showerror('Вложения', str(error))
             return
         self.files = list(selected)
-        self.attachments.config(text='; '.join(Path(p).name for p in self.files) or 'Вложений нет')
+        self.attachments.config(text='; '.join(attachment_name(root,p) for p in self.files) or 'Вложений нет')
 
     def send(self):
         if not self.gmail:
@@ -773,14 +776,15 @@ class App:
                 path = Path(filename)
                 mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
                 major, minor = mime.split('/', 1)
-                message.add_attachment(path.read_bytes(), maintype=major, subtype=minor, filename=path.name)
+                message.add_attachment(path.read_bytes(), maintype=major, subtype=minor, filename=attachment_name(settings['folder'],path))
             encoded = message.as_bytes()
             if len(encoded) > 25 * 1024 * 1024:
                 raise ValueError('Полный размер письма превышает лимит приложения 25 МБ.')
             raw = base64.urlsafe_b64encode(encoded).decode()
-            self.gmail.users().messages().send(userId='me', body={'raw': raw}).execute()
+            result = self.gmail.users().messages().send(userId='me', body={'raw': raw}).execute()
             self.log('Письмо отправлено.')
-        self.run(deliver)
+            return result
+        return self.run(deliver)
 
 
 if __name__ == '__main__':

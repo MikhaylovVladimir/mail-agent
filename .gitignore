@@ -8,3 +8,7 @@ credentials*.json
 token*.json
 attachments/
 tmp/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
