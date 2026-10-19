@@ -20,6 +20,7 @@ from attachment_selection import check_files, select_attachments, attachment_req
 from style_history import sent_style_samples
 from mail_batch import collect_unprocessed
 from voice import Recorder, cached_model, validate_model, transcribe
+from greeting import compose_body, without_greeting, without_signature
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'private'
@@ -501,8 +502,11 @@ class App:
                 raise ValueError('Укажите получателя в запросе точным именем, псевдонимом или email либо заполните поле «Кому».')
         locked_recipient = self.contacts.resolve(override)
         manually_chosen = bool(settings.get('recipient', '').strip())
+        matching = [row.get('salutation', '') for row in self.contacts.list() if row['email'].casefold() == locked_recipient.casefold()]
+        salutations = set(matching)
+        salutation = next(iter(salutations)) if len(salutations) == 1 else ''
         context = {'request': settings['prompt'], 'recipient_override': override,
-                   'contacts': self.contacts.list(),
+                   'contacts': [],
                    'provided_files': [Path(p).name for p in settings.get('files', [])]}
         prompt = json.dumps(context, ensure_ascii=False)
         result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM, prompt)
@@ -515,13 +519,15 @@ class App:
                 self.log('Историю стиля получить не удалось (' + type(error).__name__ + '); используется официальный тон.')
             if samples:
                 self.log(f'Для стиля использовано отправленных писем: {len(samples)}.')
-                context['style_examples'] = samples
+                context['style_examples'] = [without_signature(without_greeting(sample)) for sample in samples
+                                            if without_signature(without_greeting(sample))]
                 context['recipient_override'] = draft['recipient']
                 result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM,
                                    json.dumps(context, ensure_ascii=False))
                 draft = validate_draft(result, self.contacts, settings['prompt'], draft['recipient'])
             else:
                 self.log('Нет доступных текстовых образцов: используется официальный тон.')
+        draft['body'] = compose_body(draft['body'], salutation, settings['prompt'])
         selected_files = settings.get('files', [])
         if attachment_requested(settings['prompt']) and not selected_files and not draft['attachment_queries']:
             raise ValueError('Запрошено вложение, но модель не указала поиск. Уточните запрос или выберите файл вручную.')
@@ -559,8 +565,9 @@ class App:
             tree.heading(key, text=title)
             tree.column(key, width=230)
         tree.pack(fill='both', expand=True, pady=8)
-        name, email, aliases = tk.StringVar(), tk.StringVar(), tk.StringVar()
-        for title, variable in [('Имя', name), ('Email', email), ('Псевдонимы через запятую (например начальник, руководитель)', aliases)]:
+        name, email, aliases, salutation = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+        for title, variable in [('Название контакта', name), ('Email', email), ('Псевдонимы через запятую (например начальник, руководитель)', aliases),
+                                ('Обращение в письме (например Иван Петрович). Пусто — без имени.', salutation)]:
             ttk.Label(frame, text=title).pack(anchor='w')
             ttk.Entry(frame, textvariable=variable).pack(fill='x')
         current = [None]
@@ -581,6 +588,7 @@ class App:
                 name.set(row['name'])
                 email.set(row['email'])
                 aliases.set(', '.join(row['aliases']))
+                salutation.set(row.get('salutation', ''))
 
         def new():
             current[0] = None
@@ -588,10 +596,11 @@ class App:
             name.set('')
             email.set('')
             aliases.set('')
+            salutation.set('')
 
         def save():
             try:
-                self.contacts.save(name.get(), email.get(), aliases.get().split(','), current[0])
+                self.contacts.save(name.get(), email.get(), aliases.get().split(','), current[0], salutation=salutation.get())
                 refresh()
                 new()
                 self.log('Контакт сохранён.')

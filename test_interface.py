@@ -142,6 +142,14 @@ class InterfaceTests(unittest.TestCase):
         error.assert_called_once()
         self.assertFalse(self.app.contacts.list())
 
+    def test_optional_contact_salutation_is_saved(self):
+        self.app.show_page('Контакты')
+        entries = [w for w in self.widgets(self.app.pages['Контакты']) if w.winfo_class() == 'TEntry']
+        for entry, value in zip(entries, ['Тестовый пользователь', 'test@example.com', 'тест', 'Иван Петрович']):
+            entry.insert(0, value)
+        self.button('Сохранить').invoke()
+        self.assertEqual(self.app.contacts.list()[0]['salutation'], 'Иван Петрович')
+
     def test_catalog_scan_search_preview_buttons(self):
         from tkinter import ttk
         from tkinter.scrolledtext import ScrolledText

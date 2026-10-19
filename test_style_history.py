@@ -70,7 +70,7 @@ class StyleTests(unittest.TestCase):
             history.assert_called_once_with(app.gmail, 'ivan@example.com')
             self.assertEqual(model.call_count, 2)
             context = json.loads(model.call_args.args[3])
-            self.assertEqual(context['style_examples'], ['Добрый день!'])
+            self.assertEqual(context['style_examples'], [])  # Greeting-only samples carry no reusable text.
             self.assertEqual(context['recipient_override'], 'ivan@example.com')
             app.gmail.users.assert_not_called()
 
@@ -81,4 +81,4 @@ class StyleTests(unittest.TestCase):
             with patch('app.ask_model', return_value=answer) as model, patch('app.sent_style_samples', side_effect=TimeoutError):
                 app.draft({'prompt': 'Напиши начальнику', 'endpoint': 'unused', 'model': 'unused', 'files': [], 'use_style': True})
             self.assertEqual(model.call_count, 1)
-            app.body.insert.assert_called_once_with('1.0', 'Готово')
+            app.body.insert.assert_called_once_with('1.0', 'Здравствуйте!\n\nГотово')

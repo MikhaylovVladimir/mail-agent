@@ -96,6 +96,25 @@ class LMStudioTests(unittest.TestCase):
         self.assertNotIn('987654', draft['body'])
         self.assertNotIn('OldCompany', draft['body'])
 
+    def test_unrelated_names_in_history_never_become_test_contact_greeting(self):
+        from unittest.mock import patch
+        self.contacts.save('Тестовый пользователь', 'test.user@example.com')
+        app = App.__new__(App)
+        app.contacts, app.gmail = self.contacts, Mock()
+        app.recipient, app.subject, app.body, app.attachments, app.log = Mock(), Mock(), Mock(), Mock(), Mock()
+        app.window = Mock()
+        app.window.after.side_effect = lambda delay,callback: callback()
+        with patch('app.sent_style_samples',return_value=[
+                'Здравствуйте, Сергей Петрович!\n\nНаправляю старый отчёт.\nС уважением, Алексей Иванов']):
+            app.draft(dict(prompt='Напиши тестовому пользователю, что новый отчёт готов. Без подписи.',
+                           recipient='', files=[], use_style=True,
+                           endpoint=os.environ.get('MAIL_AGENT_API','http://127.0.0.1:22227/v1'),
+                           model=os.environ.get('MAIL_AGENT_MODEL','qwen3.5-4b')))
+        text = app.body.insert.call_args.args[1]
+        self.assertTrue(text.startswith('Здравствуйте!\n\n'))
+        for name in ('Сергей', 'Петрович', 'Алексей', 'Иванов'):
+            self.assertNotIn(name,text)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
