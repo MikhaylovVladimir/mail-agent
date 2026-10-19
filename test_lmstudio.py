@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from app import ask_model, CLASSIFY_SYSTEM
+from app import App, ask_model, CLASSIFY_SYSTEM
+from unittest.mock import Mock
 from contacts import Contacts, DRAFT_SYSTEM, validate_draft
 from attachment_selection import select_attachments
 from catalog import Catalog
@@ -12,6 +13,25 @@ from catalog import Catalog
 
 @unittest.skipUnless(os.environ.get('MAIL_AGENT_LIVE_TESTS') == '1', 'LM Studio tests are opt-in')
 class LMStudioTests(unittest.TestCase):
+    def test_repeated_exact_test_user_request_with_manual_file(self):
+        self.contacts.save('Тестовый пользователь', 'test.user@example.com')
+        app = App.__new__(App)
+        app.contacts = self.contacts
+        app.recipient, app.subject, app.body, app.attachments, app.log = Mock(), Mock(), Mock(), Mock(), Mock()
+        app.window = Mock()
+        app.window.after.side_effect = lambda delay, callback: callback()
+        app.gmail = None
+        path = Path(self.temp.name)/'report.txt'
+        path.write_text('Отчёт за сентябрь', encoding='utf-8')
+        settings = dict(prompt='Напиши тестовому пользователю, что отчет готов и приложи отчет за сентябрь.',
+                        recipient='',files=[str(path)],folder=self.temp.name,use_style=False,
+                        endpoint=os.environ.get('MAIL_AGENT_API','http://127.0.0.1:22227/v1'),
+                        model=os.environ.get('MAIL_AGENT_MODEL','qwen3.5-4b'))
+        for _ in range(2):
+            app.draft(settings)
+            self.assertEqual(app.recipient.set.call_args.args[0], 'test.user@example.com')
+            self.assertEqual(app.files, [str(path.resolve())])
+
     def test_classification_matrix_and_embedded_instructions(self):
         fixtures = [
             ('Безопасность', 'Двухфакторная аутентификация включена для вашего аккаунта.'),

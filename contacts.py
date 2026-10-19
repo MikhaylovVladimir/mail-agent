@@ -24,6 +24,38 @@ def valid_email(value):
         for label in labels)
 
 
+def request_recipient(contacts, request):
+    """Resolve explicit addresses/names conservatively, without trusting the LLM."""
+    supplied = {value.casefold(): value for value in re.findall(
+        r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", request) if valid_email(value)}
+    if len(supplied) > 1:
+        raise ValueError('В запросе несколько email. Укажите одного получателя в поле «Кому».')
+    if supplied:
+        return next(iter(supplied.values()))
+
+    def words(text):
+        result = []
+        for word in re.findall(r'[а-яa-z0-9]+', text.casefold().replace('ё', 'е')):
+            if re.fullmatch('[а-я]+', word) and len(word) > 3:
+                for ending in ('ому', 'ему', 'ого', 'его', 'ыми', 'ими', 'ая', 'яя', 'ый', 'ий', 'ой', 'ую', 'юю', 'ам', 'ям', 'ом', 'ем', 'а', 'я', 'у', 'ю', 'е', 'ы', 'и', 'ь'):
+                    if word.endswith(ending) and len(word)-len(ending) >= 3:
+                        word = word[:-len(ending)]
+                        break
+            result.append(word)
+        return result
+
+    tokens = words(request)
+    matches = {}
+    for row in contacts.list():
+        for alias in [row['name'], *row['aliases']]:
+            pattern = words(alias)
+            if pattern and any(tokens[i:i+len(pattern)] == pattern for i in range(len(tokens)-len(pattern)+1)):
+                matches[row['email'].casefold()] = row['email']
+    if len(matches) > 1:
+        raise ValueError('В запросе несколько подходящих контактов. Укажите точного получателя в поле «Кому».')
+    return next(iter(matches.values()), None)
+
+
 class Contacts:
     def __init__(self, path):
         self.path = Path(path)
@@ -116,6 +148,7 @@ def validate_draft(answer, contacts, request, recipient_override=''):
     if not isinstance(draft, dict) or any(not isinstance(draft.get(k), str) or not draft[k].strip()
                                           for k in ('recipient', 'subject', 'body')):
         raise ValueError('В черновике отсутствуют получатель, тема или текст.')
+    expected = contacts.resolve(recipient_override) if recipient_override.strip() else request_recipient(contacts, request)
     key = recipient_override.strip() or draft['recipient'].strip()
     # A model cannot introduce a new email address absent from the user's request.
     if not recipient_override and valid_email(key):
@@ -124,6 +157,10 @@ def validate_draft(answer, contacts, request, recipient_override=''):
         if key.casefold() not in known | supplied:
             raise ValueError('Модель предложила неизвестный email. Укажите получателя самостоятельно.')
     recipient = contacts.resolve(key)
+    if not expected:
+        raise ValueError('Не удалось однозначно определить получателя из запроса. Укажите email или контакт в поле «Кому».')
+    if recipient.casefold() != expected.casefold():
+        raise ValueError('Модель выбрала другого получателя. Укажите нужный контакт в поле «Кому» и повторите подготовку.')
     if '\n' in draft['subject'] or '\r' in draft['subject']:
         raise ValueError('Тема письма должна быть одной строкой.')
     queries = draft.get('attachment_queries', [])

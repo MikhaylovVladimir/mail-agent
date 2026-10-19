@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from catalog import Catalog
-from contacts import Contacts, DRAFT_SYSTEM, validate_draft
+from contacts import Contacts, DRAFT_SYSTEM, validate_draft, request_recipient
 from document_reader import LocalOCR
 from attachment_selection import check_files, select_attachments, attachment_requested
 from style_history import sent_style_samples
@@ -140,6 +140,8 @@ class App:
         self.model = tk.StringVar(value='qwen3.5-4b')
         self.limit = tk.StringVar(value='5')
         self.recipient = tk.StringVar()
+        self.recipient_origin = 'manual'
+        self.recipient.trace_add('write', self.recipient_edited)
         self.subject = tk.StringVar()
         self.folder = tk.StringVar(value=str(PRIVATE / 'attachments'))
         from interface import build
@@ -222,6 +224,8 @@ class App:
         self.voice_settings.config(state='disabled')
         # Read Tk state on the UI thread; workers never access Tk variables.
         settings = {name: getattr(self, name).get() for name in ('endpoint', 'model', 'limit', 'folder', 'recipient')}
+        if getattr(self, 'recipient_origin', 'manual') == 'generated' and action == self.draft:
+            settings['recipient'] = ''
         settings['prompt'] = self.prompt.get('1.0', 'end').strip()
         settings['files'] = self.files.copy()
         settings['use_style'] = self.use_style.get()
@@ -236,6 +240,8 @@ class App:
                 action(settings)
             except Exception as error:
                 self.log('Ошибка: ' + str(error))
+                if action == self.draft:
+                    self.post(lambda message=str(error): self.draft_alert.config(text='Черновик не обновлён: '+message))
             finally:
                 def finish():
                     self.busy = False
@@ -246,6 +252,23 @@ class App:
                     self.stop_button.config(state='disabled')
                 self.post(finish)
         threading.Thread(target=worker, daemon=True).start()
+
+    def recipient_edited(self, *args):
+        if not getattr(self, '_setting_recipient', False):
+            self.recipient_origin = 'manual'
+            if hasattr(self, 'recipient_hint'):
+                self.recipient_hint.config(text=('Получатель выбран вручную — имеет приоритет над запросом.'
+                    if self.recipient.get().strip() else 'Если поле пустое, получатель определяется из запроса.'))
+
+    def generated_recipient(self, value):
+        self._setting_recipient = True
+        try:
+            self.recipient.set(value)
+        finally:
+            self._setting_recipient = False
+        self.recipient_origin = 'generated'
+        if hasattr(self, 'recipient_hint'):
+            self.recipient_hint.config(text='Получатель определён из запроса; при новой генерации будет определён заново.')
 
     def choose_voice_model(self):
         folder = filedialog.askdirectory(title='Локальная модель faster-whisper', initialdir=self.voice_model or str(PRIVATE))
@@ -273,6 +296,8 @@ class App:
         self.subject.set('')
         self.body.delete('1.0', 'end')
         self.clear_attachments()
+        if hasattr(self, 'draft_alert'):
+            self.draft_alert.config(text='')
 
     def cancel_voice(self):
         recorder, self.recorder = self.recorder, None
@@ -371,7 +396,9 @@ class App:
                  else '-label:Agent/Обработано')
         query += ' -in:trash -in:spam -in:sent -in:drafts'
         stop = getattr(self, 'stop_sorting', threading.Event())
-        if all_mail:
+        if 'message_ids' in settings:
+            batch = {'messages': [{'id': value} for value in dict.fromkeys(settings['message_ids'])]}
+        elif all_mail:
             items = collect_unprocessed(api.messages(), limit, stop, self.log)
             if stop.is_set():
                 self.log('Сбор списка остановлен. Письма не изменены; следующий запуск начнёт заново.')
@@ -468,12 +495,18 @@ class App:
         override = settings.get('recipient', '').strip()
         if override:
             self.contacts.resolve(override)
+        else:
+            override = request_recipient(self.contacts, settings['prompt'])
+            if not override:
+                raise ValueError('Укажите получателя в запросе точным именем, псевдонимом или email либо заполните поле «Кому».')
+        locked_recipient = self.contacts.resolve(override)
+        manually_chosen = bool(settings.get('recipient', '').strip())
         context = {'request': settings['prompt'], 'recipient_override': override,
                    'contacts': self.contacts.list(),
                    'provided_files': [Path(p).name for p in settings.get('files', [])]}
         prompt = json.dumps(context, ensure_ascii=False)
         result = ask_model(settings['endpoint'], settings['model'], DRAFT_SYSTEM, prompt)
-        draft = validate_draft(result, self.contacts, settings['prompt'], override)
+        draft = validate_draft(result, self.contacts, settings['prompt'], locked_recipient)
         if settings.get('use_style', False):
             try:
                 samples = sent_style_samples(self.gmail, draft['recipient'])
@@ -495,7 +528,12 @@ class App:
         if draft['attachment_queries'] or selected_files:
             selected_files = select_attachments(Catalog(settings['folder']), draft['attachment_queries'], selected_files)
         def show():
-            self.recipient.set(draft['recipient'])
+            if hasattr(self, 'draft_alert'):
+                self.draft_alert.config(text='')
+            if manually_chosen:
+                self.recipient.set(draft['recipient'])
+            else:
+                self.generated_recipient(draft['recipient'])
             self.subject.set(draft['subject'])
             self.body.delete('1.0', 'end')
             self.body.insert('1.0', draft['body'])
