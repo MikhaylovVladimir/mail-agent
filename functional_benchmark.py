@@ -273,7 +273,7 @@ def boundary_tests(root):
             rows.append(dict(case=key,passed=False,error=str(error)))
     report=summarize(rows)
     dump(root/'boundary-results.json',report)
-    print(f"Граничные случаи: {report['passed']}/{report['total']}",flush=True)
+    print(f"Boundary cases: {report['passed']}/{report['total']}",flush=True)
     return report
 
 

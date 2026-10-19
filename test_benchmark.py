@@ -6,11 +6,16 @@ from functional_benchmark import distance,normalized
 class BenchmarkTests(unittest.TestCase):
     def test_operations_and_boundary_corpora(self):
         import tempfile
+        import io
+        from contextlib import redirect_stdout
         from pathlib import Path
         from functional_benchmark import operation_tests,boundary_tests
         with tempfile.TemporaryDirectory() as folder:
             for operation in (operation_tests,boundary_tests):
-                report=operation(Path(folder))
+                # Match the English Windows CI console, which cannot encode Cyrillic.
+                with io.TextIOWrapper(io.BytesIO(),encoding='cp1252') as output:
+                    with redirect_stdout(output):
+                        report=operation(Path(folder))
                 self.assertEqual(report['total'],30)
                 self.assertEqual(report['passed'],30)
     def test_fixed_corpus_unique_cases_and_balanced_categories(self):
